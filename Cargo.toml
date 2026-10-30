@@ -1,0 +1,8 @@
+[package]
+name = "gravither"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal two-user connection model for Gravither"
+license = "Apache-2.0"
+
+[dependencies]
