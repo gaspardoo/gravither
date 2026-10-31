@@ -286,6 +286,8 @@ pub enum ProcessState { Running, Stopped }
 pub struct UserProcess {
     pub user_id: UserId,
     pub state: ProcessState,
+    /// Incoming observation endpoint belongs to the user process, not the observer service.
+    pub exposure_socket: SocketState,
     storage_dir: PathBuf,
     activity_log: PathBuf,
 }
@@ -295,6 +297,7 @@ impl UserProcess {
         Ok(Self {
             user_id,
             state: ProcessState::Running,
+            exposure_socket: SocketState::Open,
             storage_dir: account_dir.join("storage"),
             activity_log: account_dir.join("activity.log"),
         })
@@ -360,6 +363,7 @@ impl RuntimeSession {
         self.observation.stop();
         self.common_space.state = ProcessState::Stopped;
         self.user_process.record_activity("user logged out")?;
+        self.user_process.exposure_socket = SocketState::Closed;
         self.user_process.state = ProcessState::Stopped;
         Ok(())
     }
