@@ -6,4 +6,4 @@ description = "Minimal portal and observation runtime prototype for Gravither"
 license = "Apache-2.0"
 
 [dependencies]
-argon2 = "0.5"
+argon2 = "0.6"
