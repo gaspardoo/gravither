@@ -6,10 +6,12 @@
 pub mod admin;
 pub mod anchor;
 pub mod session;
+pub mod user;
 
 pub use admin::Admin;
 pub use anchor::AnchorSpace;
 pub use session::Session;
+pub use user::User;
 
 use std::{
     fs::{self, OpenOptions},
