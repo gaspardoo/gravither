@@ -1,31 +1,42 @@
 # Gravither
 
-A minimal Rust experiment that starts with **Life — Entity Recorder**.
+A minimal Rust prototype exploring separate responsibilities for **Getin**, **Signup**, **Life — Entity Recorder**, and **Unicrypt**.
 
-## Life
+## Expected credential flow
 
-Life records the creation of observer users in a plain text file. It does not create the anchor space and does not implement observer behavior.
+- **Getin** coordinates voluntary entry and decides whether to authenticate an existing user or continue through Signup.
+- **Signup** validates the password confirmation and delegates account creation to Life.
+- **Life** owns identity, account files, default user data, and entity-creation records. It delegates hashing and verification to Unicrypt.
+- **Unicrypt** hashes passwords with Argon2 and verifies a supplied password against a stored hash. Passwords are never stored as plaintext.
 
-Run the program with:
+An unknown account can proceed to Signup. An incorrect password for an existing account is rejected and never routed into registration. Missing or malformed credential files are treated as storage/integrity errors, not as evidence that an account does not exist.
 
-```sh
-cargo run
-```
+## Run the programs
 
-Enter a user name when prompted. Life appends a line to `.gravither-data/users.txt`. Each line contains the record type and the supplied name, separated by a tab.
+    cargo run --bin getin
+    cargo run --bin signup
+    cargo run --bin gravither
 
-Run the tests with:
+- **getin** asks for a username and password. Existing users are authenticated; unknown users are routed to Signup and asked only to confirm the password.
+- **signup** starts registration directly.
+- **gravither** runs Life's standalone entity recorder.
 
-```sh
-cargo test
-```
+Set the GRAVITHER_HOME environment variable to change the persistent data directory. The default is .gravither-data.
 
-## Current limits
+## Account data
 
-- Only observer-user records can be created.
-- The file is a simple record list, not a complete identity system.
-- Names are not unique identifiers and no authentication is implemented.
-- No anchor space, navigation, groups, pages, posts, reporting, or interaction logic is implemented.
-- The component description is **Entity Recorder**; the component name is **Life**.
+Usernames must contain 3–32 ASCII letters, digits, hyphens, or underscores. Passwords must contain at least 8 bytes. Registration creates:
 
-This is an intentionally small prototype, licensed under Apache-2.0.
+- .gravither-data/users/<username>/credentials.txt — an encoded Argon2 hash, never plaintext.
+- .gravither-data/users/<username>/default.txt — initial default value.
+- .gravither-data/users/<username>/storage/ — user storage directory.
+- .gravither-data/entities.txt — entity-creation records.
+
+This is an early local prototype, not a production authentication system. Sessions, 2FA, metrics, navigation, and observation are not started by successful entry yet.
+
+## Quality checks
+
+    cargo fmt --all -- --check
+    cargo clippy --all-targets --all-features -- -D warnings
+    cargo test --all-targets --all-features
+    cargo build --all-targets --all-features
