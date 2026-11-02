@@ -1,4 +1,4 @@
-//! Gravither prototype: Life entity recorder, Admin, and Session process models.
+//! Gravither prototype: Life entity recorder and minimal process contexts.
 //!
 //! Life records the creation of observer users. It does not create an anchor
 //! space or implement user behavior.
@@ -6,8 +6,8 @@
 pub mod admin;
 pub mod session;
 
-pub use admin::{Admin, RepresentationKind};
-pub use session::{ProcessState, Session, SessionError, SessionProcessKind};
+pub use admin::Admin;
+pub use session::Session;
 
 use std::{
     fs::{self, OpenOptions},
