@@ -5,7 +5,7 @@
 
 use argon2::{
     password_hash::{
-        rand_core::OsRng, ErrorKind, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+        rand_core::OsRng, Error, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
     },
     Argon2,
 };
@@ -48,7 +48,7 @@ pub fn verify_password(
 
     match Argon2::default().verify_password(password.as_bytes(), &parsed_hash) {
         Ok(()) => Ok(true),
-        Err(error) if error.kind() == Some(ErrorKind::Password) => Ok(false),
+        Err(Error::Password) => Ok(false),
         Err(_) => Err(UnicryptError::VerificationFailed),
     }
 }
