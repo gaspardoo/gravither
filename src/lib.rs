@@ -262,6 +262,31 @@ mod tests {
     }
 
     #[test]
+    fn life_persists_only_argon2_hash_and_authenticates_through_unicrypt() {
+        let root = temp_root();
+        let life = Life::new(&root);
+        let password = "integration-test-password";
+
+        life.create_user("HashCheck", password).unwrap();
+
+        let credentials_path = root.join("users/HashCheck/credentials.txt");
+        let stored = fs::read_to_string(&credentials_path).unwrap();
+        let encoded_hash = stored.trim();
+
+        // Argon2 PHC hashes identify themselves with the $argon2 prefix.
+        assert!(encoded_hash.starts_with("$argon2"), "stored value must be an Argon2 hash");
+        assert!(!stored.contains(password), "plaintext password must never be persisted");
+
+        assert_eq!(life.authenticate_user("HashCheck", password).unwrap(), "HashCheck");
+        assert!(matches!(
+            life.authenticate_user("HashCheck", "incorrect-password"),
+            Err(LifeError::InvalidCredentials)
+        ));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn recorder_rejects_empty_name() {
         let root = temp_root();
         let life = Life::new(&root);
