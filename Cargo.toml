@@ -2,8 +2,14 @@
 name = "gravither"
 version = "0.1.0"
 edition = "2021"
-description = "Entity Recorder"
+description = "Life — Entity Recorder, Signup and Getin"
 license = "Apache-2.0"
+
+[workspace]
+members = ["unicrypt"]
+resolver = "2"
 
 [dependencies]
 ulid = "1"
+rpassword = "7"
+unicrypt = { path = "unicrypt" }
