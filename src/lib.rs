@@ -4,9 +4,11 @@
 //! space or implement user behavior.
 
 pub mod admin;
+pub mod anchor;
 pub mod session;
 
 pub use admin::Admin;
+pub use anchor::AnchorSpace;
 pub use session::Session;
 
 use std::{
