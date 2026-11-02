@@ -53,7 +53,7 @@ mod tests {
     use super::AnchorSpace;
 
     #[test]
-    fn default_anchor_space_keeps_admin_and_session() {
+    fn default_anchor_space_keeps_sysruning_admin_and_session() {
         let space = AnchorSpace::default();
         assert!(space.contains_process(0));
         assert!(space.contains_process(1));
