@@ -5,15 +5,12 @@
 //! delegating account creation to Life. No sessions, 2FA, metrics or observation
 //! processes are started here.
 
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
 };
+use unicrypt::{hash_password, verify_password, UnicryptError};
 
 const OBSERVER_USER: &str = "observer-user";
 
@@ -86,11 +83,8 @@ impl Life {
         fs::create_dir_all(&dir)?;
 
         let result = (|| -> Result<(), LifeError> {
-            let salt = SaltString::generate(&mut OsRng);
-            let hash = Argon2::default()
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(|error| LifeError::PasswordHash(error.to_string()))?
-                .to_string();
+            let hash = hash_password(password)
+                .map_err(|error| LifeError::PasswordHash(error.to_string()))?;
             fs::write(dir.join("credentials.txt"), format!("{hash}\n"))?;
             fs::write(dir.join("default.txt"), "default=default\n")?;
             fs::create_dir_all(dir.join("storage"))?;
@@ -114,10 +108,13 @@ impl Life {
             if error.kind() == io::ErrorKind::NotFound { LifeError::AccountNotFound }
             else { LifeError::Io(error) }
         })?;
-        let parsed = PasswordHash::new(encoded.trim()).map_err(|_| LifeError::InvalidCredentials)?;
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .map_err(|_| LifeError::InvalidCredentials)?;
+        match verify_password(password, encoded.trim()) {
+            Ok(true) => {}
+            Ok(false) | Err(UnicryptError::InvalidEncodedHash) => {
+                return Err(LifeError::InvalidCredentials);
+            }
+            Err(error) => return Err(LifeError::PasswordHash(error.to_string())),
+        }
         Ok(username.to_string())
     }
 
