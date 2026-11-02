@@ -52,13 +52,34 @@ impl Sysruning {
     /// Session and viewer are ready. Life will later coordinate that transition.
     pub fn launch_plan(&self) -> &'static [LaunchStep] {
         const PLAN: &[LaunchStep] = &[
-            LaunchStep { program: Program::Admin, phase: LaunchPhase::SystemStartup },
-            LaunchStep { program: Program::Session, phase: LaunchPhase::SystemStartup },
-            LaunchStep { program: Program::Unicrypt, phase: LaunchPhase::SystemStartup },
-            LaunchStep { program: Program::GetIn, phase: LaunchPhase::SystemStartup },
-            LaunchStep { program: Program::SignUp, phase: LaunchPhase::SystemStartup },
-            LaunchStep { program: Program::Viewer, phase: LaunchPhase::SessionReady },
-            LaunchStep { program: Program::User, phase: LaunchPhase::SessionReady },
+            LaunchStep {
+                program: Program::Admin,
+                phase: LaunchPhase::SystemStartup,
+            },
+            LaunchStep {
+                program: Program::Session,
+                phase: LaunchPhase::SystemStartup,
+            },
+            LaunchStep {
+                program: Program::Unicrypt,
+                phase: LaunchPhase::SystemStartup,
+            },
+            LaunchStep {
+                program: Program::GetIn,
+                phase: LaunchPhase::SystemStartup,
+            },
+            LaunchStep {
+                program: Program::SignUp,
+                phase: LaunchPhase::SystemStartup,
+            },
+            LaunchStep {
+                program: Program::Viewer,
+                phase: LaunchPhase::SessionReady,
+            },
+            LaunchStep {
+                program: Program::User,
+                phase: LaunchPhase::SessionReady,
+            },
         ];
 
         PLAN
