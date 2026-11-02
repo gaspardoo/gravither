@@ -1,31 +1,57 @@
 # Gravither
 
-A minimal Rust experiment that starts with **Life — Entity Recorder**.
+A minimal Rust prototype exploring separate responsibilities for **Getin**, **Signup**, and **Life — Entity Recorder**, with cryptographic operations delegated to **Unicrypt**.
 
-## Life
+## Responsibility boundary
 
-Life records the creation of observer users in a plain text file. It does not create the anchor space and does not implement observer behavior.
+- **Getin** coordinates entry and chooses between authentication and registration.
+- **Signup** validates password confirmation, then delegates account creation to Life.
+- **Life — Entity Recorder** records entity creation, stores account files, and asks Unicrypt to hash or verify passwords. Life does not implement a cryptographic algorithm itself.
+- **Unicrypt — Cryptographic Mechanism Manager** is a separate Rust library. For now it implements password hashing and verification using Argon2.
+- **2FA, metrics and observation** are intentionally not implemented.
 
-Run the program with:
+Gravither is an operating-system concept, not a social network with a forced login gate. A future feed can remain navigable before entry; that feed UI is not part of this terminal prototype.
+
+## Run programs
+
+Run Getin (when its branch is included):
 
 ```sh
-cargo run
+cargo run --bin getin
 ```
 
-Enter a user name when prompted. Life appends a line to `.gravither-data/users.txt`. Each line contains the record type and the supplied name, separated by a tab.
-
-Run the tests with:
+Run Signup directly:
 
 ```sh
-cargo test
+cargo run --bin signup
 ```
 
-## Current limits
+Run Life's standalone recorder:
 
-- Only observer-user records can be created.
-- The file is a simple record list, not a complete identity system.
-- Names are not unique identifiers and no authentication is implemented.
-- No anchor space, navigation, groups, pages, posts, reporting, or interaction logic is implemented.
-- The component description is **Entity Recorder**; the component name is **Life**.
+```sh
+cargo run --bin gravither
+```
 
-This is an intentionally small prototype, licensed under Apache-2.0.
+The default data directory is `.gravither-data`; set `GRAVITHER_HOME` to use another directory. Usernames must contain 3–32 ASCII letters, digits, hyphens or underscores. Passwords must contain at least 8 bytes.
+
+## Unicrypt
+
+The library is located in `unicrypt/`.
+
+- `hash_password(password)` creates an encoded Argon2 hash with a cryptographically secure random salt.
+- `verify_password(password, encoded_hash)` returns `true` for a match and `false` for a mismatch.
+- Malformed hashes and technical failures are reported as errors.
+- Unicrypt never stores the original password.
+
+Argon2 password hashing is one-way; it does not encrypt data for later decryption. SHA-256, SHA-512, and reversible encryption are not implemented yet.
+
+## Tests
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
+cargo build --workspace --all-targets --all-features
+```
+
+This is an early local prototype, not a production authentication system. No real network connections, long-running sessions, 2FA, metrics, or observation processes are created.
