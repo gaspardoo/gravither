@@ -6,3 +6,4 @@ description = "Entity Recorder"
 license = "Apache-2.0"
 
 [dependencies]
+ulid = "1"
