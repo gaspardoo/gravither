@@ -1,7 +1,10 @@
-//! Life — Entity Recorder.
+//! Gravither prototype: Life entity recorder and Admin process model.
 //!
 //! Life records the creation of observer users. It does not create an anchor
 //! space or implement user behavior.
+
+pub mod admin;
+pub use admin::{Admin, RepresentationKind};
 
 use std::{
     fs::{self, OpenOptions},
