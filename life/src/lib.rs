@@ -60,7 +60,7 @@ impl Life {
             .append(true)
             .open(&self.file)?;
 
-        writeln!(file, "{OBSERVER_USER}\\t{name}")?;
+        writeln!(file, "{OBSERVER_USER}\t{name}")?;
         Ok(())
     }
 
@@ -91,7 +91,7 @@ mod tests {
         life.record_observer_user("Alice").unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "observer-user\\tAlice\\n"
+            "observer-user\tAlice\n"
         );
         fs::remove_file(path).unwrap();
     }
@@ -104,7 +104,7 @@ mod tests {
         life.record_observer_user("Bob").unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "observer-user\\tAlice\\nobserver-user\\tBob\\n"
+            "observer-user\tAlice\nobserver-user\tBob\n"
         );
         fs::remove_file(path).unwrap();
     }
