@@ -202,6 +202,71 @@ impl Signup {
     }
 }
 
+
+/// Getin coordinates the initial entry flow. It never hashes or decrypts
+/// credentials itself; Life verifies stored password hashes.
+#[derive(Clone, Debug)]
+pub struct Getin {
+    life: Life,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetinOutcome {
+    Authenticated(String),
+    Registered(String),
+    SignupRequired,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetinError {
+    Signup(SignupError),
+    Life(LifeErrorKind),
+}
+
+impl std::fmt::Display for GetinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signup(error) => write!(f, "Signup failed: {error}"),
+            Self::Life(kind) => write!(f, "Life rejected credentials: {kind:?}"),
+        }
+    }
+}
+impl std::error::Error for GetinError {}
+
+impl Getin {
+    pub fn new(life: Life) -> Self { Self { life } }
+
+    /// Check existing credentials. If the account does not exist, return
+    /// SignupRequired unless a confirmation was supplied, then delegate to Signup.
+    /// No session, 2FA, metrics or observation process is started here.
+    pub fn enter(
+        &self,
+        username: &str,
+        password: &str,
+        password_confirmation: Option<&str>,
+    ) -> Result<GetinOutcome, GetinError> {
+        match self.life.authenticate_user(username, password) {
+            Ok(username) => Ok(GetinOutcome::Authenticated(username)),
+            Err(LifeError::AccountNotFound) => {
+                match password_confirmation {
+                    None => Ok(GetinOutcome::SignupRequired),
+                    Some(confirmation) => Signup::new(self.life.clone())
+                        .register(username, password, confirmation)
+                        .map(GetinOutcome::Registered)
+                        .map_err(GetinError::Signup),
+                }
+            }
+            Err(LifeError::Io(_)) => Err(GetinError::Life(LifeErrorKind::Io)),
+            Err(LifeError::EmptyName) => Err(GetinError::Life(LifeErrorKind::EmptyName)),
+            Err(LifeError::InvalidUsername) => Err(GetinError::Life(LifeErrorKind::InvalidUsername)),
+            Err(LifeError::AccountAlreadyExists) => Err(GetinError::Life(LifeErrorKind::AccountAlreadyExists)),
+            Err(LifeError::InvalidCredentials) => Err(GetinError::Life(LifeErrorKind::InvalidCredentials)),
+            Err(LifeError::PasswordHash(_)) => Err(GetinError::Life(LifeErrorKind::PasswordHash)),
+            Err(LifeError::AccountNotFound) => unreachable!("handled above"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +327,57 @@ mod tests {
         Signup::new(life.clone()).register("Alice", "correct-horse", "correct-horse").unwrap();
         assert!(matches!(life.authenticate_user("Alice", "wrong-password"), Err(LifeError::InvalidCredentials)));
         fs::remove_dir_all(root).unwrap();
+    }
+
+
+    #[test]
+    fn getin_authenticates_existing_user_through_life() {
+        let root = temp_root();
+        let life = Life::new(&root);
+        Signup::new(life.clone()).register("Alice", "correct-horse", "correct-horse").unwrap();
+        let getin = Getin::new(life);
+        assert_eq!(
+            getin.enter("Alice", "correct-horse", None).unwrap(),
+            GetinOutcome::Authenticated("Alice".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn getin_routes_unknown_user_to_signup_with_original_values() {
+        let root = temp_root();
+        let getin = Getin::new(Life::new(&root));
+        assert_eq!(getin.enter("Alice", "correct-horse", None).unwrap(), GetinOutcome::SignupRequired);
+        assert_eq!(
+            getin.enter("Alice", "correct-horse", Some("correct-horse")).unwrap(),
+            GetinOutcome::Registered("Alice".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn getin_does_not_route_wrong_password_to_signup() {
+        let root = temp_root();
+        let life = Life::new(&root);
+        Signup::new(life.clone()).register("Alice", "correct-horse", "correct-horse").unwrap();
+        let getin = Getin::new(life);
+        assert_eq!(
+            getin.enter("Alice", "wrong-password", None),
+            Err(GetinError::Life(LifeErrorKind::InvalidCredentials))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn getin_rejects_mismatched_confirmation_for_new_user() {
+        let root = temp_root();
+        let getin = Getin::new(Life::new(&root));
+        assert_eq!(
+            getin.enter("Alice", "correct-horse", Some("different-password")),
+            Err(GetinError::Signup(SignupError::PasswordMismatch))
+        );
+        assert!(!root.join("users/Alice").exists());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
