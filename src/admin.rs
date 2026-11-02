@@ -1,8 +1,7 @@
 //! Minimal logical model for Gravither's Admin program.
 //!
-//! Admin is represented independently from the entity it acts for. Its logical
-//! PID identifies the Admin program instance; the identifier and kind identify
-//! the user or process represented by that instance.
+//! Each Admin instance has its own logical PID and a process name composed of
+//! the program name and the identifier of the user or process it represents.
 
 /// The kind of entity represented by an Admin instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,9 +12,9 @@ pub enum RepresentationKind {
 
 /// An Admin program instance.
 ///
-/// The represented entity identifier is kept as a string so callers can supply
-/// identifiers from different namespaces without forcing them into a numeric
-/// format. The PID is Admin's own logical process identifier.
+/// The represented entity identifier accepts values from different identifier
+/// namespaces. Admin's process name follows the format `admin - <identifier>`,
+/// while its logical PID independently identifies this Admin instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admin {
     identifier: String,
@@ -26,7 +25,7 @@ pub struct Admin {
 impl Admin {
     /// Create an Admin instance representing a process, with logical PID 1.
     ///
-    /// The represented entity may use any non-empty identifier.
+    /// The represented entity may use any identifier.
     pub fn new(identifier: impl Into<String>) -> Self {
         Self::with_pid_and_kind(identifier, 1, RepresentationKind::Process)
     }
@@ -36,7 +35,7 @@ impl Admin {
         Self::with_pid_and_kind(identifier, 1, RepresentationKind::User)
     }
 
-    /// Create an Admin instance representing a process with a specified PID.
+    /// Create an Admin instance representing a process, with logical PID 1.
     pub fn for_process(identifier: impl Into<String>) -> Self {
         Self::with_pid_and_kind(identifier, 1, RepresentationKind::Process)
     }
@@ -59,6 +58,13 @@ impl Admin {
         &self.identifier
     }
 
+    /// Return this process's name, combining the program name and represented ID.
+    ///
+    /// For example, an Admin representing process "1" is named "admin - 1".
+    pub fn process_name(&self) -> String {
+        format!("admin - {}", self.identifier)
+    }
+
     /// Return Admin's own logical process identifier.
     pub fn pid(&self) -> u64 {
         self.pid
@@ -71,7 +77,7 @@ impl Admin {
 }
 
 impl Default for Admin {
-    /// Create the initial Admin instance: process "1" with PID 1.
+    /// Create the initial Admin instance representing process "1", with PID 1.
     fn default() -> Self {
         Self::new("1")
     }
@@ -82,10 +88,11 @@ mod tests {
     use super::{Admin, RepresentationKind};
 
     #[test]
-    fn default_admin_uses_identifier_and_pid_one() {
+    fn default_admin_uses_process_name_admin_one_and_pid_one() {
         let admin = Admin::default();
 
         assert_eq!(admin.identifier(), "1");
+        assert_eq!(admin.process_name(), "admin - 1");
         assert_eq!(admin.pid(), 1);
         assert_eq!(admin.representation(), RepresentationKind::Process);
     }
@@ -95,6 +102,7 @@ mod tests {
         let admin = Admin::new("machine:operator/process-A");
 
         assert_eq!(admin.identifier(), "machine:operator/process-A");
+        assert_eq!(admin.process_name(), "admin - machine:operator/process-A");
         assert_eq!(admin.pid(), 1);
         assert_eq!(admin.representation(), RepresentationKind::Process);
     }
@@ -104,6 +112,7 @@ mod tests {
         let admin = Admin::for_user("user-ulid-01");
 
         assert_eq!(admin.identifier(), "user-ulid-01");
+        assert_eq!(admin.process_name(), "admin - user-ulid-01");
         assert_eq!(admin.pid(), 1);
         assert_eq!(admin.representation(), RepresentationKind::User);
     }
@@ -114,6 +123,7 @@ mod tests {
             Admin::with_pid_and_kind("operator-7", 42, RepresentationKind::User);
 
         assert_eq!(admin.identifier(), "operator-7");
+        assert_eq!(admin.process_name(), "admin - operator-7");
         assert_eq!(admin.pid(), 42);
         assert_eq!(admin.representation(), RepresentationKind::User);
     }
