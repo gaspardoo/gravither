@@ -1,8 +1,3 @@
-[package]
-name = "gravither"
-version = "0.1.0"
-edition = "2021"
-description = "Entity Recorder"
-license = "Apache-2.0"
-
-[dependencies]
+[workspace]
+members = ["life", "unicrypt"]
+resolver = "2"
