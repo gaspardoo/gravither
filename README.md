@@ -1,31 +1,45 @@
 # Gravither
 
-A minimal Rust experiment that starts with **Life — Entity Recorder**.
+A minimal Rust prototype exploring the separation between **Signup** and **Life — Entity Recorder**.
 
-## Life
+## Responsibility boundary
 
-Life records the creation of observer users in a plain text file. It does not create the anchor space and does not implement observer behavior.
+- **Signup** collects a username, password and password confirmation. It rejects mismatched or too-short passwords and delegates account creation to Life.
+- **Life — Entity Recorder** owns the credential-processing boundary, stores password hashes, creates the initial user files and records entity creation.
+- **Getin** will later coordinate the linear entry flow and choose between registration and authentication. It is not implemented in this increment.
+- **2FA, metrics and observation** are intentionally not implemented. Successful Signup does not start them.
 
-Run the program with:
+These are separate responsibilities. Signup currently exists as a library component and a small CLI binary; Life is a library component with its own recorder binary.
+
+## Run Signup
 
 ```sh
-cargo run
+cargo run --bin signup
 ```
 
-Enter a user name when prompted. Life appends a line to `.gravither-data/users.txt`. Each line contains the record type and the supplied name, separated by a tab.
+Signup asks for a username, password and confirmation. Password input is hidden by the terminal prompt. The default data directory is `.gravither-data`; set `GRAVITHER_HOME` to use another directory.
 
-Run the tests with:
+Usernames must contain 3–32 ASCII letters, digits, hyphens or underscores. Passwords must contain at least 8 bytes. Life stores an Argon2 password hash, never the plaintext password. Successful registration creates:
+
+- `.gravither-data/users/<username>/credentials.txt`
+- `.gravither-data/users/<username>/default.txt`, containing exactly `default=default`
+- `.gravither-data/users/<username>/storage/`
+- `.gravither-data/entities.txt`, recording entity creation
+
+This is an early local prototype, not a production authentication system. Account storage and identity lifecycle will evolve as Getin and the remaining system services are implemented.
+
+## Run Life's recorder
+
+```sh
+cargo run --bin gravither
+```
+
+This standalone recorder prompts for an observer-user name and appends an entity record. It does not start navigation, metrics or observation.
+
+## Tests
 
 ```sh
 cargo test
 ```
 
-## Current limits
-
-- Only observer-user records can be created.
-- The file is a simple record list, not a complete identity system.
-- Names are not unique identifiers and no authentication is implemented.
-- No anchor space, navigation, groups, pages, posts, reporting, or interaction logic is implemented.
-- The component description is **Entity Recorder**; the component name is **Life**.
-
-This is an intentionally small prototype, licensed under Apache-2.0.
+Tests cover password confirmation, short passwords, successful registration, password hashing/authentication, and empty-name rejection. No real network connections, sessions, 2FA, metrics, or observation processes are created.
