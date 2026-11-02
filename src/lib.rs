@@ -1,15 +1,14 @@
-//! Life — Entity Recorder.
+//! Life — Entity Recorder and credential boundary.
 //!
-//! Life owns the credential-processing boundary and records entity creation.
-//! Signup is a separate registration flow that validates confirmation before
-//! delegating account creation to Life. No sessions, 2FA, metrics or observation
-//! processes are started here.
+//! Life owns user identity and persistence. Cryptographic work is delegated to
+//! Unicrypt; plaintext passwords are never written to storage.
 
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
 };
+
 use unicrypt::{hash_password, verify_password, UnicryptError};
 
 const OBSERVER_USER: &str = "observer-user";
@@ -30,21 +29,25 @@ impl std::fmt::Display for LifeError {
         match self {
             Self::Io(error) => write!(f, "storage error: {error}"),
             Self::EmptyName => write!(f, "user name cannot be empty"),
-            Self::InvalidUsername => write!(f, "username must contain 3-32 ASCII letters, digits, '-' or '_'"),
+            Self::InvalidUsername => {
+                write!(f, "username must contain 3-32 ASCII letters, digits, '-' or '_'")
+            }
             Self::AccountAlreadyExists => write!(f, "account already exists"),
             Self::AccountNotFound => write!(f, "account not found"),
             Self::InvalidCredentials => write!(f, "invalid username or password"),
-            Self::PasswordHash(error) => write!(f, "password hashing error: {error}"),
+            Self::PasswordHash(error) => write!(f, "credential hash error: {error}"),
         }
     }
 }
 
 impl std::error::Error for LifeError {}
+
 impl From<io::Error> for LifeError {
-    fn from(error: io::Error) -> Self { Self::Io(error) }
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
-/// Life's entity recorder and credential-processing boundary.
 #[derive(Clone, Debug)]
 pub struct Life {
     root: PathBuf,
@@ -52,40 +55,78 @@ pub struct Life {
 }
 
 impl Life {
-    /// Store accounts and entity records under the supplied data directory.
+    /// Use the supplied directory as Life's persistent data root.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        Self { records_file: root.join("entities.txt"), root }
+        Self {
+            records_file: root.join("entities.txt"),
+            root,
+        }
     }
 
-    pub fn root(&self) -> &Path { &self.root }
-    pub fn records_file(&self) -> &Path { &self.records_file }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn records_file(&self) -> &Path {
+        &self.records_file
+    }
 
     fn valid_username(username: &str) -> bool {
         (3..=32).contains(&username.len())
-            && username.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && username
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     }
 
     fn account_dir(&self, username: &str) -> Result<PathBuf, LifeError> {
-        if !Self::valid_username(username) { return Err(LifeError::InvalidUsername); }
+        if username.is_empty() {
+            return Err(LifeError::EmptyName);
+        }
+        if !Self::valid_username(username) {
+            return Err(LifeError::InvalidUsername);
+        }
         Ok(self.root.join("users").join(username))
     }
 
+    fn existing_account_dir(&self, username: &str) -> Result<PathBuf, LifeError> {
+        let dir = self.account_dir(username)?;
+        match fs::metadata(&dir) {
+            Ok(metadata) if metadata.is_dir() => Ok(dir),
+            Ok(_) => Err(LifeError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "account path is not a directory",
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(LifeError::AccountNotFound)
+            }
+            Err(error) => Err(LifeError::Io(error)),
+        }
+    }
+
     /// Create an account after Signup has confirmed the password.
-    /// The password is persisted only as an Argon2 hash, never as plaintext.
+    /// Unicrypt returns the encoded Argon2 hash; Life is responsible for storing it.
     pub fn create_user(&self, username: &str, password: &str) -> Result<String, LifeError> {
         let username = username.trim();
-        if username.is_empty() { return Err(LifeError::EmptyName); }
-        if password.len() < 8 { return Err(LifeError::InvalidCredentials); }
-
         let dir = self.account_dir(username)?;
-        if dir.exists() { return Err(LifeError::AccountAlreadyExists); }
-        fs::create_dir_all(&dir)?;
+        if password.len() < 8 {
+            return Err(LifeError::InvalidCredentials);
+        }
+
+        fs::create_dir_all(self.root.join("users"))?;
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(LifeError::AccountAlreadyExists);
+            }
+            Err(error) => return Err(LifeError::Io(error)),
+        }
 
         let result = (|| -> Result<(), LifeError> {
-            let hash = hash_password(password)
+            let encoded_hash = hash_password(password)
                 .map_err(|error| LifeError::PasswordHash(error.to_string()))?;
-            fs::write(dir.join("credentials.txt"), format!("{hash}\n"))?;
+
+            fs::write(dir.join("credentials.txt"), format!("{encoded_hash}\n"))?;
             fs::write(dir.join("default.txt"), "default=default\n")?;
             fs::create_dir_all(dir.join("storage"))?;
             self.record_observer_user(username)?;
@@ -100,40 +141,45 @@ impl Life {
         Ok(username.to_string())
     }
 
-    /// Authenticate credentials against the hash stored by Life.
+    /// Verify credentials through Unicrypt against the hash stored by Life.
     pub fn authenticate_user(&self, username: &str, password: &str) -> Result<String, LifeError> {
         let username = username.trim();
-        let dir = self.account_dir(username)?;
-        let encoded = fs::read_to_string(dir.join("credentials.txt")).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound { LifeError::AccountNotFound }
-            else { LifeError::Io(error) }
-        })?;
-        match verify_password(password, encoded.trim()) {
-            Ok(true) => {}
-            Ok(false) | Err(UnicryptError::InvalidEncodedHash) => {
-                return Err(LifeError::InvalidCredentials);
-            }
-            Err(error) => return Err(LifeError::PasswordHash(error.to_string())),
+        let dir = self.existing_account_dir(username)?;
+        let encoded_hash = fs::read_to_string(dir.join("credentials.txt"))?;
+
+        match verify_password(password, encoded_hash.trim()) {
+            Ok(true) => Ok(username.to_string()),
+            Ok(false) => Err(LifeError::InvalidCredentials),
+            Err(UnicryptError::InvalidEncodedHash) => Err(LifeError::PasswordHash(
+                UnicryptError::InvalidEncodedHash.to_string(),
+            )),
+            Err(error) => Err(LifeError::PasswordHash(error.to_string())),
         }
-        Ok(username.to_string())
     }
 
-    /// Append one entity record. This records entity creation, not visits or metrics.
+    /// Append an entity-creation record. This does not record visits or metrics.
     pub fn record_observer_user(&self, name: &str) -> Result<(), LifeError> {
         let name = name.trim();
-        if name.is_empty() { return Err(LifeError::EmptyName); }
+        if name.is_empty() {
+            return Err(LifeError::EmptyName);
+        }
 
         if let Some(parent) = self.records_file.parent() {
-            if !parent.as_os_str().is_empty() { fs::create_dir_all(parent)?; }
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.records_file)?;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.records_file)?;
         writeln!(file, "{OBSERVER_USER}\t{name}")?;
         Ok(())
     }
 }
 
-/// Signup validates the registration form, then delegates credential handling
-/// and entity creation to Life. It does not authenticate existing users.
+/// Signup validates registration input, then delegates account creation to Life.
 #[derive(Clone, Debug)]
 pub struct Signup {
     life: Life,
@@ -157,18 +203,23 @@ pub enum LifeErrorKind {
     PasswordHash,
 }
 
+impl From<LifeError> for LifeErrorKind {
+    fn from(error: LifeError) -> Self {
+        match error {
+            LifeError::Io(_) => Self::Io,
+            LifeError::EmptyName => Self::EmptyName,
+            LifeError::InvalidUsername => Self::InvalidUsername,
+            LifeError::AccountAlreadyExists => Self::AccountAlreadyExists,
+            LifeError::AccountNotFound => Self::AccountNotFound,
+            LifeError::InvalidCredentials => Self::InvalidCredentials,
+            LifeError::PasswordHash(_) => Self::PasswordHash,
+        }
+    }
+}
+
 impl From<LifeError> for SignupError {
     fn from(error: LifeError) -> Self {
-        let kind = match error {
-            LifeError::Io(_) => LifeErrorKind::Io,
-            LifeError::EmptyName => LifeErrorKind::EmptyName,
-            LifeError::InvalidUsername => LifeErrorKind::InvalidUsername,
-            LifeError::AccountAlreadyExists => LifeErrorKind::AccountAlreadyExists,
-            LifeError::AccountNotFound => LifeErrorKind::AccountNotFound,
-            LifeError::InvalidCredentials => LifeErrorKind::InvalidCredentials,
-            LifeError::PasswordHash(_) => LifeErrorKind::PasswordHash,
-        };
-        Self::Life(kind)
+        Self::Life(error.into())
     }
 }
 
@@ -181,27 +232,31 @@ impl std::fmt::Display for SignupError {
         }
     }
 }
+
 impl std::error::Error for SignupError {}
 
 impl Signup {
-    pub fn new(life: Life) -> Self { Self { life } }
+    pub fn new(life: Life) -> Self {
+        Self { life }
+    }
 
-    /// Register a user after confirming that both password fields match.
     pub fn register(
         &self,
         username: &str,
         password: &str,
         password_confirmation: &str,
     ) -> Result<String, SignupError> {
-        if password != password_confirmation { return Err(SignupError::PasswordMismatch); }
-        if password.len() < 8 { return Err(SignupError::PasswordTooShort); }
+        if password != password_confirmation {
+            return Err(SignupError::PasswordMismatch);
+        }
+        if password.len() < 8 {
+            return Err(SignupError::PasswordTooShort);
+        }
         self.life.create_user(username, password).map_err(Into::into)
     }
 }
 
-
-/// Getin coordinates the initial entry flow. It never hashes or decrypts
-/// credentials itself; Life verifies stored password hashes.
+/// Getin coordinates voluntary entry. It delegates all credential work to Life.
 #[derive(Clone, Debug)]
 pub struct Getin {
     life: Life,
@@ -228,14 +283,18 @@ impl std::fmt::Display for GetinError {
         }
     }
 }
+
 impl std::error::Error for GetinError {}
 
 impl Getin {
-    pub fn new(life: Life) -> Self { Self { life } }
+    pub fn new(life: Life) -> Self {
+        Self { life }
+    }
 
-    /// Check existing credentials. If the account does not exist, return
-    /// SignupRequired unless a confirmation was supplied, then delegate to Signup.
-    /// No session, 2FA, metrics or observation process is started here.
+    /// Authenticate an existing account, or continue through Signup for a new one.
+    ///
+    /// Supplying a confirmation completes Signup only when the account is absent.
+    /// A wrong password for an existing account is always rejected.
     pub fn enter(
         &self,
         username: &str,
@@ -244,22 +303,14 @@ impl Getin {
     ) -> Result<GetinOutcome, GetinError> {
         match self.life.authenticate_user(username, password) {
             Ok(username) => Ok(GetinOutcome::Authenticated(username)),
-            Err(LifeError::AccountNotFound) => {
-                match password_confirmation {
-                    None => Ok(GetinOutcome::SignupRequired),
-                    Some(confirmation) => Signup::new(self.life.clone())
-                        .register(username, password, confirmation)
-                        .map(GetinOutcome::Registered)
-                        .map_err(GetinError::Signup),
-                }
-            }
-            Err(LifeError::Io(_)) => Err(GetinError::Life(LifeErrorKind::Io)),
-            Err(LifeError::EmptyName) => Err(GetinError::Life(LifeErrorKind::EmptyName)),
-            Err(LifeError::InvalidUsername) => Err(GetinError::Life(LifeErrorKind::InvalidUsername)),
-            Err(LifeError::AccountAlreadyExists) => Err(GetinError::Life(LifeErrorKind::AccountAlreadyExists)),
-            Err(LifeError::InvalidCredentials) => Err(GetinError::Life(LifeErrorKind::InvalidCredentials)),
-            Err(LifeError::PasswordHash(_)) => Err(GetinError::Life(LifeErrorKind::PasswordHash)),
-            Err(LifeError::AccountNotFound) => unreachable!("handled above"),
+            Err(LifeError::AccountNotFound) => match password_confirmation {
+                None => Ok(GetinOutcome::SignupRequired),
+                Some(confirmation) => Signup::new(self.life.clone())
+                    .register(username, password, confirmation)
+                    .map(GetinOutcome::Registered)
+                    .map_err(GetinError::Signup),
+            },
+            Err(error) => Err(GetinError::Life(error.into())),
         }
     }
 }
@@ -273,7 +324,10 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("gravither-signup-test-{}-{number}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "gravither-identity-test-{}-{number}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -283,13 +337,24 @@ mod tests {
         let signup = Signup::new(life.clone());
 
         assert_eq!(
-            signup.register("Alice", "correct-horse", "correct-horse").unwrap(),
+            signup
+                .register("Alice", "correct-horse", "correct-horse")
+                .unwrap(),
             "Alice"
         );
         assert!(root.join("users/Alice/credentials.txt").exists());
-        assert_eq!(fs::read_to_string(root.join("users/Alice/default.txt")).unwrap(), "default=default\n");
-        assert_eq!(fs::read_to_string(life.records_file()).unwrap(), "observer-user\tAlice\n");
-        assert_eq!(life.authenticate_user("Alice", "correct-horse").unwrap(), "Alice");
+        assert_eq!(
+            fs::read_to_string(root.join("users/Alice/default.txt")).unwrap(),
+            "default=default\n"
+        );
+        assert_eq!(
+            fs::read_to_string(life.records_file()).unwrap(),
+            "observer-user\tAlice\n"
+        );
+        assert_eq!(
+            life.authenticate_user("Alice", "correct-horse").unwrap(),
+            "Alice"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -297,6 +362,7 @@ mod tests {
     fn signup_rejects_mismatched_password_without_creating_user() {
         let root = temp_root();
         let signup = Signup::new(Life::new(&root));
+
         assert_eq!(
             signup.register("Alice", "correct-horse", "different-password"),
             Err(SignupError::PasswordMismatch)
@@ -309,6 +375,7 @@ mod tests {
     fn signup_rejects_short_password() {
         let root = temp_root();
         let signup = Signup::new(Life::new(&root));
+
         assert_eq!(
             signup.register("Alice", "short", "short"),
             Err(SignupError::PasswordTooShort)
@@ -318,21 +385,29 @@ mod tests {
     }
 
     #[test]
-    fn life_authentication_rejects_wrong_password() {
+    fn signup_rejects_duplicate_account() {
         let root = temp_root();
-        let life = Life::new(&root);
-        Signup::new(life.clone()).register("Alice", "correct-horse", "correct-horse").unwrap();
-        assert!(matches!(life.authenticate_user("Alice", "wrong-password"), Err(LifeError::InvalidCredentials)));
+        let signup = Signup::new(Life::new(&root));
+        signup
+            .register("Alice", "correct-horse", "correct-horse")
+            .unwrap();
+
+        assert!(matches!(
+            signup.register("Alice", "another-password", "another-password"),
+            Err(SignupError::Life(LifeErrorKind::AccountAlreadyExists))
+        ));
         fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn getin_authenticates_existing_user_through_life() {
         let root = temp_root();
         let life = Life::new(&root);
-        Signup::new(life.clone()).register("Alice", "correct-horse", "correct-horse").unwrap();
+        Signup::new(life.clone())
+            .register("Alice", "correct-horse", "correct-horse")
+            .unwrap();
         let getin = Getin::new(life);
+
         assert_eq!(
             getin.enter("Alice", "correct-horse", None).unwrap(),
             GetinOutcome::Authenticated("Alice".to_string())
@@ -344,59 +419,61 @@ mod tests {
     fn getin_routes_unknown_user_to_signup_with_original_values() {
         let root = temp_root();
         let getin = Getin::new(Life::new(&root));
-        assert_eq!(getin.enter("Alice", "correct-horse", None).unwrap(), GetinOutcome::SignupRequired);
+
         assert_eq!(
-            getin.enter("Alice", "correct-horse", Some("correct-horse")).unwrap(),
+            getin.enter("Alice", "correct-horse", None).unwrap(),
+            GetinOutcome::SignupRequired
+        );
+        assert_eq!(
+            getin
+                .enter("Alice", "correct-horse", Some("correct-horse"))
+                .unwrap(),
             GetinOutcome::Registered("Alice".to_string())
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn getin_does_not_route_wrong_password_to_signup() {
+    fn getin_never_routes_a_wrong_password_to_signup() {
         let root = temp_root();
         let life = Life::new(&root);
-        Signup::new(life.clone()).register("Alice", "correct-horse", "correct-horse").unwrap();
+        Signup::new(life.clone())
+            .register("Alice", "correct-horse", "correct-horse")
+            .unwrap();
         let getin = Getin::new(life);
+
         assert_eq!(
-            getin.enter("Alice", "wrong-password", None),
+            getin.enter("Alice", "wrong-password", Some("wrong-password")),
             Err(GetinError::Life(LifeErrorKind::InvalidCredentials))
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn getin_rejects_mismatched_confirmation_for_new_user() {
+    fn malformed_stored_hash_is_not_treated_as_a_wrong_password() {
         let root = temp_root();
+        let account = root.join("users/Alice");
+        fs::create_dir_all(&account).unwrap();
+        fs::write(account.join("credentials.txt"), "not-a-phc-hash\n").unwrap();
         let getin = Getin::new(Life::new(&root));
+
         assert_eq!(
-            getin.enter("Alice", "correct-horse", Some("different-password")),
-            Err(GetinError::Signup(SignupError::PasswordMismatch))
+            getin.enter("Alice", "some-password", None),
+            Err(GetinError::Life(LifeErrorKind::PasswordHash))
         );
-        assert!(!root.join("users/Alice").exists());
-        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn life_persists_only_argon2_hash_and_authenticates_through_unicrypt() {
+    fn incomplete_account_is_not_routed_to_signup() {
         let root = temp_root();
-        let life = Life::new(&root);
-        let password = "integration-test-password";
+        fs::create_dir_all(root.join("users/Alice")).unwrap();
+        let getin = Getin::new(Life::new(&root));
 
-        life.create_user("HashCheck", password).unwrap();
-
-        let credentials_path = root.join("users/HashCheck/credentials.txt");
-        let stored = fs::read_to_string(&credentials_path).unwrap();
-        let encoded_hash = stored.trim();
-
-        assert!(encoded_hash.starts_with("$argon2"), "stored value must be an Argon2 hash");
-        assert!(!stored.contains(password), "plaintext password must never be persisted");
-        assert_eq!(life.authenticate_user("HashCheck", password).unwrap(), "HashCheck");
         assert!(matches!(
-            life.authenticate_user("HashCheck", "incorrect-password"),
-            Err(LifeError::InvalidCredentials)
+            getin.enter("Alice", "some-password", None),
+            Err(GetinError::Life(LifeErrorKind::Io))
         ));
-
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -404,7 +481,11 @@ mod tests {
     fn recorder_rejects_empty_name() {
         let root = temp_root();
         let life = Life::new(&root);
-        assert!(matches!(life.record_observer_user("  "), Err(LifeError::EmptyName)));
+
+        assert!(matches!(
+            life.record_observer_user("  "),
+            Err(LifeError::EmptyName)
+        ));
         assert!(!life.records_file().exists());
         fs::remove_dir_all(root).ok();
     }
