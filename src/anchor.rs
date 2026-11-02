@@ -38,9 +38,10 @@ impl AnchorSpace {
 }
 
 impl Default for AnchorSpace {
-    /// The initial anchor space contains Admin (PID 1) and Session (PID 2).
+    /// The initial anchor space contains Sysruning (PID 0), Admin (PID 1), and Session (PID 2).
     fn default() -> Self {
         let mut space = Self::new();
+        space.add_process(0);
         space.add_process(1);
         space.add_process(2);
         space
@@ -54,6 +55,7 @@ mod tests {
     #[test]
     fn default_anchor_space_keeps_admin_and_session() {
         let space = AnchorSpace::default();
+        assert!(space.contains_process(0));
         assert!(space.contains_process(1));
         assert!(space.contains_process(2));
         assert!(!space.contains_process(3));
