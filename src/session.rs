@@ -89,6 +89,24 @@ impl Session {
         Ok(())
     }
 
+    /// Return the kind of an associated process.
+    pub fn process_kind(&self, pid: u64) -> Result<SessionProcessKind, SessionError> {
+        self.processes
+            .iter()
+            .find(|process| process.pid == pid)
+            .map(|process| process.kind)
+            .ok_or(SessionError::ProcessNotFound(pid))
+    }
+
+    /// Return the lifecycle state of an associated process.
+    pub fn process_state(&self, pid: u64) -> Result<ProcessState, SessionError> {
+        self.processes
+            .iter()
+            .find(|process| process.pid == pid)
+            .map(|process| process.state)
+            .ok_or(SessionError::ProcessNotFound(pid))
+    }
+
     /// Mark an associated process as hibernating without removing it.
     pub fn hibernate_process(&mut self, pid: u64) -> Result<(), SessionError> {
         let process = self
@@ -167,8 +185,10 @@ mod tests {
         let session = Session::anchor();
 
         assert_eq!(session.pid(), 2);
-        assert!(session.process_name().starts_with("session - "));
-        assert_eq!(session.process_name(), format!("session - {}", session.entity_id()));
+        assert_eq!(
+            session.process_name(),
+            format!("session - {}", session.entity_id())
+        );
     }
 
     #[test]
@@ -188,6 +208,10 @@ mod tests {
         session.add_process(1, SessionProcessKind::Admin).unwrap();
         assert!(session.should_remain_alive());
         assert_eq!(session.process_count(), 1);
+        assert_eq!(
+            session.process_kind(1),
+            Ok(SessionProcessKind::Admin)
+        );
     }
 
     #[test]
@@ -198,7 +222,10 @@ mod tests {
         session.hibernate_process(1).unwrap();
 
         assert!(session.should_remain_alive());
-        assert_eq!(session.processes[0].state, ProcessState::Hibernating);
+        assert_eq!(
+            session.process_state(1),
+            Ok(ProcessState::Hibernating)
+        );
     }
 
     #[test]
@@ -237,6 +264,10 @@ mod tests {
             session.remove_process(7),
             Err(SessionError::ProcessNotFound(7))
         );
+        assert_eq!(
+            session.process_state(7),
+            Err(SessionError::ProcessNotFound(7))
+        );
     }
 
     #[test]
@@ -247,6 +278,6 @@ mod tests {
 
         assert!(session.should_remain_alive());
         session.resume_process(3).unwrap();
-        assert_eq!(session.processes[0].state, ProcessState::Running);
+        assert_eq!(session.process_state(3), Ok(ProcessState::Running));
     }
 }
