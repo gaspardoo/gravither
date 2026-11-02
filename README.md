@@ -1,40 +1,42 @@
 # Gravither
 
-A small Rust prototype for experimenting with Gravither's startup and observation concepts. The directory layout is provisional and may change as the model evolves.
+A minimal Rust prototype exploring separate responsibilities for **Getin**, **Signup**, **Life — Entity Recorder**, and **Unicrypt**.
 
-## Startup model
+## Expected credential flow
 
-The portal performs account registration or authentication, then starts these logical components in order:
+- **Getin** coordinates voluntary entry and decides whether to authenticate an existing user or continue through Signup.
+- **Signup** validates the password confirmation and delegates account creation to Life.
+- **Life** owns identity, account files, default user data, and entity-creation records. It delegates hashing and verification to Unicrypt.
+- **Unicrypt** hashes passwords with Argon2 and verifies a supplied password against a stored hash. Passwords are never stored as plaintext.
 
-1. **User process** — represents the authenticated identity, provides storage and appends an activity log.
-2. **Common-space process** — represents the initial shared navigation context and tracks discoverable entities.
-3. **Observation service** — receives navigation control and owns one logical observer socket per device.
+An unknown account can proceed to Signup. An incorrect password for an existing account is rejected and never routed into registration. Missing or malformed credential files are treated as storage/integrity errors, not as evidence that an account does not exist.
 
-These components currently run inside a single Rust process. They are separate logical responsibilities, not operating-system child processes. The user process remains active when navigation stops. Logging out stops the observation service and common-space process, then stops the user process without deleting the account.
+## Run the programs
 
-## Try it
+    cargo run --bin getin
+    cargo run --bin signup
+    cargo run --bin gravither
 
-Run cargo run to start the portal, or cargo test to run the test suite.
+- **getin** asks for a username and password. Existing users are authenticated; unknown users are routed to Signup and asked only to confirm the password.
+- **signup** starts registration directly.
+- **gravither** runs Life's standalone entity recorder.
 
-The portal offers sign-in for an existing local account and identity creation for a new local account. After startup, use the commands status, stop-navigation, and logout.
+Set the GRAVITHER_HOME environment variable to change the persistent data directory. The default is .gravither-data.
 
-Accounts are stored under .gravither-data/users/<username> by default. Set GRAVITHER_HOME to use another data directory. Usernames are restricted to 3–32 ASCII letters, digits, hyphens or underscores. Passwords must contain at least 8 bytes and are stored as Argon2 password hashes, not plaintext. This is a local prototype, not a production authentication system.
+## Account data
 
-## Observation model
+Usernames must contain 3–32 ASCII letters, digits, hyphens, or underscores. Passwords must contain at least 8 bytes. Registration creates:
 
-An entity has two independent logical sockets:
+- .gravither-data/users/<username>/credentials.txt — an encoded Argon2 hash, never plaintext.
+- .gravither-data/users/<username>/default.txt — initial default value.
+- .gravither-data/users/<username>/storage/ — user storage directory.
+- .gravither-data/entities.txt — entity-creation records.
 
-- **Observer socket:** used by an observation service on a device to observe another entity.
-- **Exposure socket:** belongs to the user process and accepts incoming observation when enabled.
+This is an early local prototype, not a production authentication system. Sessions, 2FA, metrics, navigation, and observation are not started by successful entry yet.
 
-An observation from A to B allows exposed information to flow B → A. Mutual observation produces two directional lines. The common space enables discovery but does not automatically connect every entity.
+## Quality checks
 
-The Gravither model supports a dynamic collection of users. Socket states and information flows remain in memory; no TCP/UDP transport is implemented yet.
-
-## Permissions
-
-The initial default permission file contains exactly:
-
-    default=default
-
-This prototype does not yet implement property ownership, encryption, advanced permissions, transfer protocols, or real network connections.
+    cargo fmt --all -- --check
+    cargo clippy --all-targets --all-features -- -D warnings
+    cargo test --all-targets --all-features
+    cargo build --all-targets --all-features

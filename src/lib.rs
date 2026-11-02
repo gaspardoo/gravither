@@ -1,478 +1,504 @@
-//! Gravither prototype: portal, user process, common-space process and observation service.
+//! Life — Entity Recorder and credential boundary.
 //!
-//! All components are logical processes hosted in one Rust process for this experiment.
-//! Sockets are in-memory models; no network transport is opened.
+//! Life owns user identity and persistence. Cryptographic work is delegated to
+//! Unicrypt; plaintext passwords are never written to storage.
 
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
+pub mod admin;
+pub mod anchor;
+pub mod session;
+pub mod sysruning;
+pub mod user;
+
+pub use admin::Admin;
+pub use anchor::AnchorSpace;
+pub use session::Session;
+pub use sysruning::{LaunchPhase, LaunchStep, Program, Sysruning};
+pub use user::User;
+
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UserId(String);
+use unicrypt::{hash_password, verify_password, UnicryptError};
 
-impl UserId {
-    pub fn new(value: impl Into<String>) -> Self { Self(value.into()) }
-    pub fn as_str(&self) -> &str { &self.0 }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SocketState { Open, Closed }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundSocket {
-    pub state: SocketState,
-    pub target: Option<UserId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundSocket { pub state: SocketState }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct User {
-    pub id: UserId,
-    pub online: bool,
-    pub outbound_socket: OutboundSocket,
-    pub inbound_socket: InboundSocket,
-    pub exposed_information: Vec<String>,
-}
-
-impl User {
-    pub fn new(id: UserId) -> Self {
-        Self {
-            id,
-            online: true,
-            outbound_socket: OutboundSocket { state: SocketState::Open, target: None },
-            inbound_socket: InboundSocket { state: SocketState::Open },
-            exposed_information: Vec::new(),
-        }
-    }
-
-    fn set_online(&mut self, online: bool) {
-        self.online = online;
-        self.outbound_socket.state = if online { SocketState::Open } else { SocketState::Closed };
-        self.inbound_socket.state = if online { SocketState::Open } else { SocketState::Closed };
-        if !online { self.outbound_socket.target = None; }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectionLine { pub source: UserId, pub observer: UserId }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InformationFlow {
-    pub source: UserId,
-    pub observer: UserId,
-    pub information: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GravitherError {
-    UnknownUser(UserId),
-    UserCannotObserveItself,
-    UserOffline(UserId),
-    InboundSocketClosed(UserId),
-    OutboundSocketClosed(UserId),
-}
-
-pub struct Gravither { users: BTreeMap<UserId, User> }
-
-impl Gravither {
-    pub fn new() -> Self { Self { users: BTreeMap::new() } }
-
-    /// Compatibility helper for the original two-user experiment.
-    pub fn two_users(first: impl Into<String>, second: impl Into<String>) -> Self {
-        let mut system = Self::new();
-        system.add_user(UserId::new(first));
-        system.add_user(UserId::new(second));
-        system
-    }
-
-    pub fn add_user(&mut self, id: UserId) -> bool {
-        if self.users.contains_key(&id) { return false; }
-        self.users.insert(id.clone(), User::new(id));
-        true
-    }
-
-    pub fn users(&self) -> impl Iterator<Item = &User> { self.users.values() }
-
-    pub fn user(&self, id: &UserId) -> Option<&User> { self.users.get(id) }
-
-    pub fn set_user_online(&mut self, id: &UserId, online: bool) -> Result<(), GravitherError> {
-        let user = self.users.get_mut(id).ok_or_else(|| GravitherError::UnknownUser(id.clone()))?;
-        user.set_online(online);
-        if !online {
-            for other in self.users.values_mut() {
-                if other.outbound_socket.target.as_ref() == Some(id) {
-                    other.outbound_socket.target = None;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn observe(&mut self, observer_id: &UserId, target_id: &UserId) -> Result<(), GravitherError> {
-        if observer_id == target_id { return Err(GravitherError::UserCannotObserveItself); }
-        let observer = self.users.get(observer_id).ok_or_else(|| GravitherError::UnknownUser(observer_id.clone()))?;
-        if !observer.online { return Err(GravitherError::UserOffline(observer_id.clone())); }
-        if observer.outbound_socket.state == SocketState::Closed {
-            return Err(GravitherError::OutboundSocketClosed(observer_id.clone()));
-        }
-        let target = self.users.get(target_id).ok_or_else(|| GravitherError::UnknownUser(target_id.clone()))?;
-        if !target.online { return Err(GravitherError::UserOffline(target_id.clone())); }
-        if target.inbound_socket.state == SocketState::Closed {
-            return Err(GravitherError::InboundSocketClosed(target_id.clone()));
-        }
-        self.users.get_mut(observer_id).expect("observer checked").outbound_socket.target = Some(target_id.clone());
-        Ok(())
-    }
-
-    pub fn stop_observing(&mut self, observer_id: &UserId) -> Result<(), GravitherError> {
-        let observer = self.users.get_mut(observer_id).ok_or_else(|| GravitherError::UnknownUser(observer_id.clone()))?;
-        observer.outbound_socket.target = None;
-        Ok(())
-    }
-
-    pub fn set_inbound_socket(&mut self, id: &UserId, state: SocketState) -> Result<(), GravitherError> {
-        let user = self.users.get_mut(id).ok_or_else(|| GravitherError::UnknownUser(id.clone()))?;
-        if !user.online && state == SocketState::Open { return Err(GravitherError::UserOffline(id.clone())); }
-        user.inbound_socket.state = state;
-        Ok(())
-    }
-
-    pub fn set_outbound_socket(&mut self, id: &UserId, state: SocketState) -> Result<(), GravitherError> {
-        let user = self.users.get_mut(id).ok_or_else(|| GravitherError::UnknownUser(id.clone()))?;
-        if !user.online && state == SocketState::Open { return Err(GravitherError::UserOffline(id.clone())); }
-        user.outbound_socket.state = state;
-        if state == SocketState::Closed { user.outbound_socket.target = None; }
-        Ok(())
-    }
-
-    pub fn expose_information(&mut self, id: &UserId, information: impl Into<String>) -> Result<(), GravitherError> {
-        let user = self.users.get_mut(id).ok_or_else(|| GravitherError::UnknownUser(id.clone()))?;
-        user.exposed_information.push(information.into());
-        Ok(())
-    }
-
-    pub fn clear_exposed_information(&mut self, id: &UserId) -> Result<(), GravitherError> {
-        let user = self.users.get_mut(id).ok_or_else(|| GravitherError::UnknownUser(id.clone()))?;
-        user.exposed_information.clear();
-        Ok(())
-    }
-
-    pub fn connection_lines(&self) -> Vec<ConnectionLine> {
-        self.users.values().filter_map(|observer| {
-            if !observer.online || observer.outbound_socket.state != SocketState::Open { return None; }
-            let target = self.users.get(observer.outbound_socket.target.as_ref()?)?;
-            if !target.online || target.inbound_socket.state != SocketState::Open { return None; }
-            Some(ConnectionLine { source: target.id.clone(), observer: observer.id.clone() })
-        }).collect()
-    }
-
-    pub fn information_flows(&self) -> Vec<InformationFlow> {
-        self.connection_lines().into_iter().filter_map(|line| {
-            let source = self.users.get(&line.source)?;
-            if source.exposed_information.is_empty() { return None; }
-            Some(InformationFlow {
-                source: line.source,
-                observer: line.observer,
-                information: source.exposed_information.clone(),
-            })
-        }).collect()
-    }
-}
-
-impl Default for Gravither { fn default() -> Self { Self::new() } }
+const OBSERVER_USER: &str = "observer-user";
 
 #[derive(Debug)]
-pub enum PortalError {
-    Io(std::io::Error),
+pub enum LifeError {
+    Io(io::Error),
+    EmptyName,
     InvalidUsername,
     AccountAlreadyExists,
     AccountNotFound,
     InvalidCredentials,
     PasswordHash(String),
-    InvalidSessionState,
 }
 
-impl std::fmt::Display for PortalError {
+impl std::fmt::Display for LifeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "I/O error: {e}"),
-            Self::InvalidUsername => write!(f, "username must contain 3-32 letters, digits, '-' or '_'"),
+            Self::Io(error) => write!(f, "storage error: {error}"),
+            Self::EmptyName => write!(f, "user name cannot be empty"),
+            Self::InvalidUsername => {
+                write!(f, "username must contain 3-32 ASCII letters, digits, '-' or '_'")
+            }
             Self::AccountAlreadyExists => write!(f, "account already exists"),
             Self::AccountNotFound => write!(f, "account not found"),
             Self::InvalidCredentials => write!(f, "invalid username or password"),
-            Self::PasswordHash(e) => write!(f, "password hashing error: {e}"),
-            Self::InvalidSessionState => write!(f, "invalid session state"),
+            Self::PasswordHash(error) => write!(f, "credential hash error: {error}"),
         }
     }
 }
-impl std::error::Error for PortalError {}
-impl From<std::io::Error> for PortalError { fn from(value: std::io::Error) -> Self { Self::Io(value) } }
 
-/// Entry point for account creation, authentication and session startup.
-pub struct Portal { root: PathBuf }
+impl std::error::Error for LifeError {}
 
-impl Portal {
-    pub fn new(root: impl Into<PathBuf>) -> Self { Self { root: root.into() } }
-    pub fn root(&self) -> &Path { &self.root }
+impl From<io::Error> for LifeError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Life {
+    root: PathBuf,
+    records_file: PathBuf,
+}
+
+impl Life {
+    /// Use the supplied directory as Life's persistent data root.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        Self {
+            records_file: root.join("entities.txt"),
+            root,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn records_file(&self) -> &Path {
+        &self.records_file
+    }
 
     fn valid_username(username: &str) -> bool {
         (3..=32).contains(&username.len())
-            && username.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && username
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     }
 
-    fn account_dir(&self, username: &str) -> Result<PathBuf, PortalError> {
-        if !Self::valid_username(username) { return Err(PortalError::InvalidUsername); }
+    fn account_dir(&self, username: &str) -> Result<PathBuf, LifeError> {
+        if username.is_empty() {
+            return Err(LifeError::EmptyName);
+        }
+        if !Self::valid_username(username) {
+            return Err(LifeError::InvalidUsername);
+        }
         Ok(self.root.join("users").join(username))
     }
 
-    pub fn register(&self, username: &str, password: &str) -> Result<UserId, PortalError> {
-        if password.len() < 8 { return Err(PortalError::InvalidCredentials); }
+    fn existing_account_dir(&self, username: &str) -> Result<PathBuf, LifeError> {
         let dir = self.account_dir(username)?;
-        if dir.exists() { return Err(PortalError::AccountAlreadyExists); }
-        fs::create_dir_all(&dir)?;
-        let salt = SaltString::generate(&mut OsRng);
-        let hash = Argon2::default().hash_password(password.as_bytes(), &salt)
-            .map_err(|e| PortalError::PasswordHash(e.to_string()))?.to_string();
-        fs::write(dir.join("credentials.txt"), format!("{hash}\n"))?;
-        fs::write(dir.join("default.txt"), "default=default\n")?;
-        fs::create_dir_all(dir.join("storage"))?;
-        fs::write(dir.join("activity.log"), "Gravither user activity log\n")?;
-        Ok(UserId::new(username))
+        match fs::metadata(&dir) {
+            Ok(metadata) if metadata.is_dir() => Ok(dir),
+            Ok(_) => Err(LifeError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "account path is not a directory",
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(LifeError::AccountNotFound)
+            }
+            Err(error) => Err(LifeError::Io(error)),
+        }
     }
 
-    pub fn authenticate(&self, username: &str, password: &str) -> Result<UserId, PortalError> {
+    /// Create an account after Signup has confirmed the password.
+    /// Unicrypt returns the encoded Argon2 hash; Life is responsible for storing it.
+    pub fn create_user(&self, username: &str, password: &str) -> Result<String, LifeError> {
+        let username = username.trim();
         let dir = self.account_dir(username)?;
-        let encoded = fs::read_to_string(dir.join("credentials.txt")).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound { PortalError::AccountNotFound } else { PortalError::Io(e) }
-        })?;
-        let parsed = PasswordHash::new(encoded.trim()).map_err(|_| PortalError::InvalidCredentials)?;
-        Argon2::default().verify_password(password.as_bytes(), &parsed)
-            .map_err(|_| PortalError::InvalidCredentials)?;
-        Ok(UserId::new(username))
+        if password.len() < 8 {
+            return Err(LifeError::InvalidCredentials);
+        }
+
+        fs::create_dir_all(self.root.join("users"))?;
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(LifeError::AccountAlreadyExists);
+            }
+            Err(error) => return Err(LifeError::Io(error)),
+        }
+
+        let result = (|| -> Result<(), LifeError> {
+            let encoded_hash = hash_password(password)
+                .map_err(|error| LifeError::PasswordHash(error.to_string()))?;
+
+            fs::write(dir.join("credentials.txt"), format!("{encoded_hash}\n"))?;
+            fs::write(dir.join("default.txt"), "default=default\n")?;
+            fs::create_dir_all(dir.join("storage"))?;
+            self.record_observer_user(username)?;
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+
+        Ok(username.to_string())
     }
 
-    pub fn launch_session(&self, user_id: UserId, device_id: impl Into<String>) -> Result<RuntimeSession, PortalError> {
-        let dir = self.account_dir(user_id.as_str())?;
-        if !dir.is_dir() { return Err(PortalError::AccountNotFound); }
+    /// Verify credentials through Unicrypt against the hash stored by Life.
+    pub fn authenticate_user(&self, username: &str, password: &str) -> Result<String, LifeError> {
+        let username = username.trim();
+        let dir = self.existing_account_dir(username)?;
+        let encoded_hash = fs::read_to_string(dir.join("credentials.txt"))?;
 
-        // Startup sequence: user process -> common-space process -> observation service.
-        let mut user_process = UserProcess::start(user_id.clone(), dir)?;
-        user_process.record_activity("user process started")?;
-
-        let mut common_space = CommonSpaceProcess::start("common".to_string());
-        common_space.discover(user_id.clone());
-        user_process.record_activity("common space process started")?;
-
-        let observation = ObservationService::start(device_id.into(), common_space.id.clone());
-        user_process.record_activity("observation service started; navigation control handed off")?;
-
-        Ok(RuntimeSession { user_process, common_space, observation })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessState { Running, Stopped }
-
-pub struct UserProcess {
-    pub user_id: UserId,
-    pub state: ProcessState,
-    /// Incoming observation endpoint belongs to the user process, not the observer service.
-    pub exposure_socket: SocketState,
-    storage_dir: PathBuf,
-    activity_log: PathBuf,
-}
-
-impl UserProcess {
-    fn start(user_id: UserId, account_dir: PathBuf) -> Result<Self, PortalError> {
-        Ok(Self {
-            user_id,
-            state: ProcessState::Running,
-            exposure_socket: SocketState::Open,
-            storage_dir: account_dir.join("storage"),
-            activity_log: account_dir.join("activity.log"),
-        })
+        match verify_password(password, encoded_hash.trim()) {
+            Ok(true) => Ok(username.to_string()),
+            Ok(false) => Err(LifeError::InvalidCredentials),
+            Err(UnicryptError::InvalidEncodedHash) => Err(LifeError::PasswordHash(
+                UnicryptError::InvalidEncodedHash.to_string(),
+            )),
+            Err(error) => Err(LifeError::PasswordHash(error.to_string())),
+        }
     }
 
-    pub fn record_activity(&mut self, activity: &str) -> Result<(), PortalError> {
-        if self.state != ProcessState::Running { return Err(PortalError::InvalidSessionState); }
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.activity_log)?;
-        writeln!(file, "{timestamp}\t{activity}")?;
+    /// Append an entity-creation record. This does not record visits or metrics.
+    pub fn record_observer_user(&self, name: &str) -> Result<(), LifeError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(LifeError::EmptyName);
+        }
+
+        if let Some(parent) = self.records_file.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.records_file)?;
+        writeln!(file, "{OBSERVER_USER}\t{name}")?;
         Ok(())
     }
-
-    pub fn storage_dir(&self) -> &Path { &self.storage_dir }
 }
 
-pub struct CommonSpaceProcess {
-    pub id: String,
-    pub state: ProcessState,
-    entities: BTreeSet<UserId>,
+/// Signup validates registration input, then delegates account creation to Life.
+#[derive(Clone, Debug)]
+pub struct Signup {
+    life: Life,
 }
 
-impl CommonSpaceProcess {
-    fn start(id: String) -> Self {
-        Self { id, state: ProcessState::Running, entities: BTreeSet::new() }
+#[derive(Debug, PartialEq, Eq)]
+pub enum SignupError {
+    PasswordMismatch,
+    PasswordTooShort,
+    Life(LifeErrorKind),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LifeErrorKind {
+    Io,
+    EmptyName,
+    InvalidUsername,
+    AccountAlreadyExists,
+    AccountNotFound,
+    InvalidCredentials,
+    PasswordHash,
+}
+
+impl From<LifeError> for LifeErrorKind {
+    fn from(error: LifeError) -> Self {
+        match error {
+            LifeError::Io(_) => Self::Io,
+            LifeError::EmptyName => Self::EmptyName,
+            LifeError::InvalidUsername => Self::InvalidUsername,
+            LifeError::AccountAlreadyExists => Self::AccountAlreadyExists,
+            LifeError::AccountNotFound => Self::AccountNotFound,
+            LifeError::InvalidCredentials => Self::InvalidCredentials,
+            LifeError::PasswordHash(_) => Self::PasswordHash,
+        }
     }
-    pub fn discover(&mut self, entity: UserId) { self.entities.insert(entity); }
-    pub fn entities(&self) -> impl Iterator<Item = &UserId> { self.entities.iter() }
 }
 
-pub struct ObservationService {
-    pub device_id: String,
-    pub state: ProcessState,
-    pub observer_socket: SocketState,
-    pub common_space_id: String,
-}
-
-impl ObservationService {
-    fn start(device_id: String, common_space_id: String) -> Self {
-        Self { device_id, state: ProcessState::Running, observer_socket: SocketState::Open, common_space_id }
-    }
-    pub fn stop(&mut self) {
-        self.observer_socket = SocketState::Closed;
-        self.state = ProcessState::Stopped;
+impl From<LifeError> for SignupError {
+    fn from(error: LifeError) -> Self {
+        Self::Life(error.into())
     }
 }
 
-/// Session coordinator. Stopping navigation does not stop the user process.
-pub struct RuntimeSession {
-    pub user_process: UserProcess,
-    pub common_space: CommonSpaceProcess,
-    pub observation: ObservationService,
+impl std::fmt::Display for SignupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PasswordMismatch => write!(f, "password confirmation does not match"),
+            Self::PasswordTooShort => write!(f, "password must contain at least 8 bytes"),
+            Self::Life(kind) => write!(f, "Life rejected registration: {kind:?}"),
+        }
+    }
 }
 
-impl RuntimeSession {
-    pub fn stop_navigation(&mut self) -> Result<(), PortalError> {
-        self.observation.stop();
-        self.common_space.state = ProcessState::Stopped;
-        self.user_process.record_activity("navigation stopped; user process remains active")
+impl std::error::Error for SignupError {}
+
+impl Signup {
+    pub fn new(life: Life) -> Self {
+        Self { life }
     }
 
-    pub fn logout(&mut self) -> Result<(), PortalError> {
-        self.observation.stop();
-        self.common_space.state = ProcessState::Stopped;
-        self.user_process.record_activity("user logged out")?;
-        self.user_process.exposure_socket = SocketState::Closed;
-        self.user_process.state = ProcessState::Stopped;
-        Ok(())
+    pub fn register(
+        &self,
+        username: &str,
+        password: &str,
+        password_confirmation: &str,
+    ) -> Result<String, SignupError> {
+        if password != password_confirmation {
+            return Err(SignupError::PasswordMismatch);
+        }
+        if password.len() < 8 {
+            return Err(SignupError::PasswordTooShort);
+        }
+        self.life.create_user(username, password).map_err(Into::into)
+    }
+}
+
+/// Getin coordinates voluntary entry. It delegates all credential work to Life.
+#[derive(Clone, Debug)]
+pub struct Getin {
+    life: Life,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetinOutcome {
+    Authenticated(String),
+    Registered(String),
+    SignupRequired,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetinError {
+    Signup(SignupError),
+    Life(LifeErrorKind),
+}
+
+impl std::fmt::Display for GetinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signup(error) => write!(f, "Signup failed: {error}"),
+            Self::Life(kind) => write!(f, "Life rejected credentials: {kind:?}"),
+        }
+    }
+}
+
+impl std::error::Error for GetinError {}
+
+impl Getin {
+    pub fn new(life: Life) -> Self {
+        Self { life }
+    }
+
+    /// Authenticate an existing account, or continue through Signup for a new one.
+    ///
+    /// Supplying a confirmation completes Signup only when the account is absent.
+    /// A wrong password for an existing account is always rejected.
+    pub fn enter(
+        &self,
+        username: &str,
+        password: &str,
+        password_confirmation: Option<&str>,
+    ) -> Result<GetinOutcome, GetinError> {
+        match self.life.authenticate_user(username, password) {
+            Ok(username) => Ok(GetinOutcome::Authenticated(username)),
+            Err(LifeError::AccountNotFound) => match password_confirmation {
+                None => Ok(GetinOutcome::SignupRequired),
+                Some(confirmation) => Signup::new(self.life.clone())
+                    .register(username, password, confirmation)
+                    .map(GetinOutcome::Registered)
+                    .map_err(GetinError::Signup),
+            },
+            Err(error) => Err(GetinError::Life(error.into())),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
 
     fn temp_root() -> PathBuf {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("gravither-test-{}-{n}", std::process::id()))
-    }
-
-    fn pair() -> (Gravither, UserId, UserId) {
-        let a = UserId::new("user-a");
-        let b = UserId::new("user-b");
-        (Gravither::two_users("user-a", "user-b"), a, b)
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "gravither-identity-test-{}-{number}",
+            std::process::id()
+        ))
     }
 
     #[test]
-    fn supports_more_than_two_users() {
-        let mut system = Gravither::new();
-        for name in ["a-user", "b-user", "c-user"] { assert!(system.add_user(UserId::new(name))); }
-        assert_eq!(system.users().count(), 3);
-    }
-
-    #[test]
-    fn no_line_when_neither_user_observes_the_other() {
-        let (system, _, _) = pair();
-        assert!(system.connection_lines().is_empty());
-    }
-
-    #[test]
-    fn one_way_observation_creates_one_directional_line() {
-        let (mut system, a, b) = pair();
-        system.observe(&a, &b).unwrap();
-        let lines = system.connection_lines();
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].source, b);
-        assert_eq!(lines[0].observer, a);
-    }
-
-    #[test]
-    fn mutual_observation_creates_two_directional_lines() {
-        let (mut system, a, b) = pair();
-        system.observe(&a, &b).unwrap();
-        system.observe(&b, &a).unwrap();
-        assert_eq!(system.connection_lines().len(), 2);
-    }
-
-    #[test]
-    fn exposed_information_flows_from_observed_user_to_observer() {
-        let (mut system, a, b) = pair();
-        system.expose_information(&b, "public profile").unwrap();
-        system.observe(&a, &b).unwrap();
-        let flows = system.information_flows();
-        assert_eq!(flows.len(), 1);
-        assert_eq!(flows[0].source, b);
-        assert_eq!(flows[0].observer, a);
-        assert_eq!(flows[0].information, vec!["public profile"]);
-    }
-
-    #[test]
-    fn closing_inbound_socket_removes_line() {
-        let (mut system, a, b) = pair();
-        system.observe(&a, &b).unwrap();
-        system.set_inbound_socket(&b, SocketState::Closed).unwrap();
-        assert!(system.connection_lines().is_empty());
-    }
-
-    #[test]
-    fn taking_user_offline_closes_both_sockets_and_removes_lines() {
-        let (mut system, a, b) = pair();
-        system.observe(&a, &b).unwrap();
-        system.set_user_online(&b, false).unwrap();
-        let offline = system.user(&b).unwrap();
-        assert_eq!(offline.outbound_socket.state, SocketState::Closed);
-        assert_eq!(offline.inbound_socket.state, SocketState::Closed);
-        assert!(system.connection_lines().is_empty());
-    }
-
-    #[test]
-    fn stopping_observation_keeps_inbound_socket_open() {
-        let (mut system, a, b) = pair();
-        system.observe(&a, &b).unwrap();
-        system.stop_observing(&a).unwrap();
-        assert!(system.connection_lines().is_empty());
-        assert_eq!(system.user(&a).unwrap().inbound_socket.state, SocketState::Open);
-    }
-
-    #[test]
-    fn portal_registers_authenticates_and_starts_runtime() {
+    fn signup_confirms_password_then_delegates_to_life() {
         let root = temp_root();
-        let portal = Portal::new(&root);
-        let id = portal.register("alice_01", "correct-horse-battery").unwrap();
-        assert_eq!(portal.authenticate("alice_01", "correct-horse-battery").unwrap(), id);
-        assert!(matches!(portal.authenticate("alice_01", "wrong-password"), Err(PortalError::InvalidCredentials)));
-        let mut session = portal.launch_session(id, "device-1").unwrap();
-        assert_eq!(session.user_process.state, ProcessState::Running);
-        assert_eq!(session.common_space.state, ProcessState::Running);
-        assert_eq!(session.observation.observer_socket, SocketState::Open);
-        session.stop_navigation().unwrap();
-        assert_eq!(session.user_process.state, ProcessState::Running);
-        assert_eq!(session.observation.state, ProcessState::Stopped);
-        session.logout().unwrap();
-        assert_eq!(session.user_process.state, ProcessState::Stopped);
+        let life = Life::new(&root);
+        let signup = Signup::new(life.clone());
+
+        assert_eq!(
+            signup
+                .register("Alice", "correct-horse", "correct-horse")
+                .unwrap(),
+            "Alice"
+        );
+        assert!(root.join("users/Alice/credentials.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("users/Alice/default.txt")).unwrap(),
+            "default=default\n"
+        );
+        assert_eq!(
+            fs::read_to_string(life.records_file()).unwrap(),
+            "observer-user\tAlice\n"
+        );
+        assert_eq!(
+            life.authenticate_user("Alice", "correct-horse").unwrap(),
+            "Alice"
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn signup_rejects_mismatched_password_without_creating_user() {
+        let root = temp_root();
+        let signup = Signup::new(Life::new(&root));
+
+        assert_eq!(
+            signup.register("Alice", "correct-horse", "different-password"),
+            Err(SignupError::PasswordMismatch)
+        );
+        assert!(!root.join("users/Alice").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn signup_rejects_short_password() {
+        let root = temp_root();
+        let signup = Signup::new(Life::new(&root));
+
+        assert_eq!(
+            signup.register("Alice", "short", "short"),
+            Err(SignupError::PasswordTooShort)
+        );
+        assert!(!root.join("users/Alice").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn signup_rejects_duplicate_account() {
+        let root = temp_root();
+        let signup = Signup::new(Life::new(&root));
+        signup
+            .register("Alice", "correct-horse", "correct-horse")
+            .unwrap();
+
+        assert!(matches!(
+            signup.register("Alice", "another-password", "another-password"),
+            Err(SignupError::Life(LifeErrorKind::AccountAlreadyExists))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn getin_authenticates_existing_user_through_life() {
+        let root = temp_root();
+        let life = Life::new(&root);
+        Signup::new(life.clone())
+            .register("Alice", "correct-horse", "correct-horse")
+            .unwrap();
+        let getin = Getin::new(life);
+
+        assert_eq!(
+            getin.enter("Alice", "correct-horse", None).unwrap(),
+            GetinOutcome::Authenticated("Alice".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn getin_routes_unknown_user_to_signup_with_original_values() {
+        let root = temp_root();
+        let getin = Getin::new(Life::new(&root));
+
+        assert_eq!(
+            getin.enter("Alice", "correct-horse", None).unwrap(),
+            GetinOutcome::SignupRequired
+        );
+        assert_eq!(
+            getin
+                .enter("Alice", "correct-horse", Some("correct-horse"))
+                .unwrap(),
+            GetinOutcome::Registered("Alice".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn getin_never_routes_a_wrong_password_to_signup() {
+        let root = temp_root();
+        let life = Life::new(&root);
+        Signup::new(life.clone())
+            .register("Alice", "correct-horse", "correct-horse")
+            .unwrap();
+        let getin = Getin::new(life);
+
+        assert_eq!(
+            getin.enter("Alice", "wrong-password", Some("wrong-password")),
+            Err(GetinError::Life(LifeErrorKind::InvalidCredentials))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_stored_hash_is_not_treated_as_a_wrong_password() {
+        let root = temp_root();
+        let account = root.join("users/Alice");
+        fs::create_dir_all(&account).unwrap();
+        fs::write(account.join("credentials.txt"), "not-a-phc-hash\n").unwrap();
+        let getin = Getin::new(Life::new(&root));
+
+        assert_eq!(
+            getin.enter("Alice", "some-password", None),
+            Err(GetinError::Life(LifeErrorKind::PasswordHash))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_account_is_not_routed_to_signup() {
+        let root = temp_root();
+        fs::create_dir_all(root.join("users/Alice")).unwrap();
+        let getin = Getin::new(Life::new(&root));
+
+        assert!(matches!(
+            getin.enter("Alice", "some-password", None),
+            Err(GetinError::Life(LifeErrorKind::Io))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recorder_rejects_empty_name() {
+        let root = temp_root();
+        let life = Life::new(&root);
+
+        assert!(matches!(
+            life.record_observer_user("  "),
+            Err(LifeError::EmptyName)
+        ));
+        assert!(!life.records_file().exists());
+        fs::remove_dir_all(root).ok();
     }
 }
