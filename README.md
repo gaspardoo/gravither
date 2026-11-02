@@ -1,31 +1,40 @@
 # Gravither
 
-A minimal Rust experiment that starts with **Life — Entity Recorder**.
+A minimal Rust workspace for exploring the foundations of Gravither. Each component has a narrow responsibility.
 
-## Life
+## Components
 
-Life records the creation of observer users in a plain text file. It does not create the anchor space and does not implement observer behavior.
+### Life — Entity Recorder
 
-Run the program with:
+Life records the creation of observer users in a plain text file. It does not create the anchor space or implement observer behavior.
 
-```sh
-cargo run
-```
-
-Enter a user name when prompted. Life appends a line to `.gravither-data/users.txt`. Each line contains the record type and the supplied name, separated by a tab.
-
-Run the tests with:
+Run Life from its package:
 
 ```sh
-cargo test
+cargo run -p life
 ```
 
-## Current limits
+Records are appended to `.gravither-data/users.txt`. Each line contains the record type and name, separated by a tab.
 
-- Only observer-user records can be created.
-- The file is a simple record list, not a complete identity system.
-- Names are not unique identifiers and no authentication is implemented.
-- No anchor space, navigation, groups, pages, posts, reporting, or interaction logic is implemented.
-- The component description is **Entity Recorder**; the component name is **Life**.
+### Unicrypt — Cryptographic Mechanism Manager
 
-This is an intentionally small prototype, licensed under Apache-2.0.
+Unicrypt is a separate Rust library for cryptographic mechanisms. Its first implementation uses Argon2 for password hashing and verification.
+
+- `hash_password(password)` returns a salted, encoded Argon2 password hash.
+- `verify_password(password, encoded_hash)` returns `true` for a match and `false` for a valid hash with a different password.
+- A malformed encoded hash or a technical failure returns an error.
+
+Argon2 password hashing is one-way; it does not encrypt data for later decryption. Unicrypt does not store passwords. SHA-256, SHA-512, reversible encryption, and other mechanisms are not implemented yet.
+
+## Development
+
+Run the workspace checks:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
+cargo build --workspace --all-targets --all-features
+```
+
+This is an intentionally small prototype licensed under Apache-2.0. Life and Unicrypt do not yet implement a complete identity or authentication system, nor an anchor space, navigation, groups, pages, posts, reporting, or interaction.
