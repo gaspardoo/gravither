@@ -5,7 +5,10 @@ edition = "2021"
 description = "Life — Entity Recorder and minimal Signup flow"
 license = "Apache-2.0"
 
+[workspace]
+members = ["unicrypt"]
+resolver = "2"
+
 [dependencies]
-argon2 = "0.5"
-rand_core = { version = "0.6", features = ["getrandom"] }
 rpassword = "7"
+unicrypt = { path = "unicrypt" }
